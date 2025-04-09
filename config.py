@@ -22,6 +22,13 @@ MACRO_FEATURES = {
     # 'FEDFUNDS': 'FEDFUNDS',
 }
 
+# Add near the Data or General section
+# --- yfinance Fetching Params ---
+YFINANCE_BATCH_SIZE = 100  # How many tickers to fetch in one yf.download call
+YFINANCE_DELAY_PER_BATCH = 5 # Seconds to wait between batches (increase from 1)
+YFINANCE_MAX_RETRIES = 3     # Max attempts for a failed batch
+YFINANCE_RETRY_DELAY = 15    # Seconds to wait before retrying a failed batch
+
 # --- Features ---
 # Use pandas-ta indicator names (lowercase) and arguments
 TECHNICAL_INDICATORS = {
