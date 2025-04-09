@@ -97,13 +97,11 @@ def fetch_yfinance_data(tickers, start_date, end_date):
 
 def fetch_macro_data(macro_map, start_date, end_date):
     """Fetches macro data (e.g., VIX from yfinance, FRED data) with retries."""
-    macro_data = {}
+    macro_data_dict = {} # Use a dictionary to store individual series first
     yf_tickers = []
-    # fred_codes = [] # Uncomment if using FRED
     max_retries = config.YFINANCE_MAX_RETRIES
     retry_delay = config.YFINANCE_RETRY_DELAY
 
-    # --- Using yfinance for VIX example ---
     vix_ticker = macro_map.get('VIX')
     if vix_ticker:
         yf_tickers.append(vix_ticker)
@@ -116,88 +114,106 @@ def fetch_macro_data(macro_map, start_date, end_date):
 
                 if not data.empty:
                     if len(yf_tickers) == 1:
-                         # Check if data is Series (single ticker, non-empty) or DataFrame (multi-ticker or empty)
+                         single_ticker = yf_tickers[0]
                          if isinstance(data, pd.DataFrame) and 'Close' in data.columns:
-                              macro_data['VIX'] = data[['Close']].rename(columns={'Close': 'VIX'})
-                         else: # Handle case where single ticker returns no data or error
-                              logging.warning(f"No valid data returned for single macro ticker {yf_tickers[0]}")
-                    # Add logic if fetching multiple macro tickers from yfinance
+                              # Select and rename the 'Close' column for VIX
+                              vix_series = data['Close'].rename('VIX') # Use the key 'VIX' here
+                              macro_data_dict['VIX'] = vix_series # Store as Series
+                         else:
+                              logging.warning(f"No valid 'Close' data returned for single macro ticker {single_ticker}")
+                    # Add logic here if fetching multiple yfinance macro tickers
                 elif yf.shared._ERRORS:
-                     logging.error(f"Failed downloads for macro tickers: {yf.shared._ERRORS}")
+                     # ... (error handling for rate limit as before) ...
                      is_rate_limited = any('RateLimitError' in str(e) for e in yf.shared._ERRORS.values())
                      if is_rate_limited and attempt < max_retries - 1:
-                          raise Exception("RateLimitErrorTrigger") # Trigger retry
+                          raise Exception("RateLimitErrorTrigger")
                 else:
-                     logging.warning(f"No macro data returned from yfinance for {yf_tickers}, and no specific errors reported.")
+                     logging.warning(f"No macro data returned from yfinance for {yf_tickers}")
 
-
-                yf.shared._ERRORS = {} # Clear errors
-                logging.info(f"Successfully fetched macro data on attempt {attempt+1}")
-                break # Exit retry loop on success
-
+                yf.shared._ERRORS = {}
+                logging.info(f"Successfully fetched yfinance macro data on attempt {attempt+1}")
+                break
             except Exception as e:
+                # ... (retry logic as before) ...
                 is_rate_limit_error = 'RateLimitError' in str(e) or str(e) == "RateLimitErrorTrigger"
                 if is_rate_limit_error and attempt < max_retries - 1:
-                    logging.warning(f"Rate limit suspected for macro data on attempt {attempt+1}. Retrying in {retry_delay}s...")
-                    time.sleep(retry_delay)
+                     logging.warning(f"Rate limit suspected for macro data on attempt {attempt+1}. Retrying in {retry_delay}s...")
+                     time.sleep(retry_delay)
                 else:
-                    logging.error(f"Error fetching macro data from yfinance on attempt {attempt+1}: {e}", exc_info=not is_rate_limit_error)
-                    yf.shared._ERRORS = {} # Clear errors
-                    break # Exit retry loop
+                     logging.error(f"Error fetching macro data from yfinance on attempt {attempt+1}: {e}", exc_info=not is_rate_limit_error)
+                     yf.shared._ERRORS = {}
+                     break
 
-    # --- Add FRED data fetching here if needed (add similar retry logic) ---
-    # ...
 
-    # Combine all macro data into a single dataframe, forward fill missing values
-    if macro_data:
-        # Combine potentially multiple macro sources if implemented
-        combined_macro = pd.concat(macro_data.values(), axis=1)
+    # --- Add FRED data fetching here if needed ---
+    # fred_api_key = os.getenv('FRED_API_KEY') ... etc ...
+    # Store results in macro_data_dict['FRED_CODE'] = series
+
+    # Combine all macro data into a single dataframe
+    if macro_data_dict:
+        # Concatenate the Series/DataFrames stored in the dictionary
+        combined_macro = pd.concat(macro_data_dict.values(), axis=1, keys=macro_data_dict.keys()) # Use keys for proper naming initially
+
+        # --- Explicitly Flatten Columns ---
+        # If concat created multi-level columns (e.g., if values were DataFrames), flatten
+        if isinstance(combined_macro.columns, pd.MultiIndex):
+             logging.warning("Combined macro data has MultiIndex columns after concat. Flattening.")
+             # Assuming the desired name is in the first level (the keys we provided)
+             combined_macro.columns = combined_macro.columns.get_level_values(0)
+             combined_macro = combined_macro.loc[:,~combined_macro.columns.duplicated()]
+
+        # Ensure columns are named correctly (e.g., 'VIX')
+        logging.info(f"Combined Macro Columns Before Reindex: {combined_macro.columns.tolist()}")
+
+
         # Ensure daily frequency and forward fill
-        # Use business day frequency for market data alignment
         date_range = pd.date_range(start=start_date, end=end_date, freq='B')
-        combined_macro = combined_macro.reindex(date_range).ffill() # Reindex and fill NaNs
+        combined_macro = combined_macro.reindex(date_range).ffill()
+
+        # --- Final check before returning ---
+        if isinstance(combined_macro.columns, pd.MultiIndex):
+             logging.error("FATAL: Macro data STILL has MultiIndex columns after processing! Check concat/flatten logic.")
+             return pd.DataFrame()
+        if isinstance(combined_macro.index, pd.MultiIndex):
+             logging.error("FATAL: Macro data has MultiIndex rows after processing! Check reindex logic.")
+             return pd.DataFrame()
+
+        logging.info(f"Processed Macro Data Columns: {combined_macro.columns.tolist()}")
         return combined_macro
     else:
+        logging.info("No macro data series were successfully fetched or processed.")
         return pd.DataFrame()
 
-
+# fetch_and_save_all_data remains largely the same, but relies on fetch_macro_data returning a clean df
 def fetch_and_save_all_data(tickers, start_date, end_date):
     """Fetches stock and macro data and saves to files."""
-    # Fetch Stock Data
     stock_data = fetch_yfinance_data(tickers, start_date, end_date)
     saved_count = 0
-    valid_tickers_downloaded = list(stock_data.keys()) # Tickers we actually got data for
-
-    # Filter the original ticker list to only those successfully downloaded
-    # This ensures feature engineering doesn't try to load files for failed downloads
+    valid_tickers_downloaded = list(stock_data.keys())
     tickers_to_process = [t for t in tickers if t in valid_tickers_downloaded]
 
     for ticker in tickers_to_process:
-        df = stock_data.get(ticker) # Use .get for safety, though it should exist
+        df = stock_data.get(ticker)
         if df is not None and not df.empty:
-             # Simple check for obviously bad data (e.g., all zeros)
-             if 'Close' in df.columns and (df['Close'] > 1e-6).any(): # Check if Close exists and has positive values
-                 # Drop rows with any NaN values *before* saving
+             if 'Close' in df.columns and (df['Close'] > 1e-6).any():
                  df_cleaned = df.dropna(how='any')
                  if not df_cleaned.empty:
                       utils.save_data_to_file(df_cleaned, ticker)
                       saved_count += 1
                  else:
                       logging.warning(f"Skipping save for {ticker}, all rows contained NaN after dropna().")
-
              else:
-                 logging.warning(f"Skipping save for {ticker} due to potentially bad data (e.g., zero closes or missing Close column).")
-        # No need for 'else' here, already filtered by tickers_to_process
+                 logging.warning(f"Skipping save for {ticker} due to potentially bad data.")
 
     logging.info(f"Saved data for {saved_count} stock tickers.")
 
-    # Fetch Macro Data
-    macro_df = fetch_macro_data(config.MACRO_FEATURES, start_date, end_date)
+    macro_df = fetch_macro_data(config.MACRO_FEATURES, start_date, end_date) # Get the processed df
     if macro_df is not None and not macro_df.empty:
-        utils.save_data_to_file(macro_df.dropna(), "_macro_data") # Save with a special name, drop NaNs
+        # Save the already cleaned and potentially NaN-dropped DataFrame
+        utils.save_data_to_file(macro_df, "_macro_data")
         logging.info("Saved macro data.")
     else:
-        logging.warning("No macro data was fetched or generated.")
+        logging.warning("No final macro data DataFrame to save.")
 
 
 if __name__ == "__main__":
