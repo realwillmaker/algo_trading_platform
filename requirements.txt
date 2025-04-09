@@ -1,0 +1,23 @@
+pandas>=1.5.0
+numpy>=1.23.0
+requests>=2.28.0
+python-dotenv>=0.21.0
+pyyaml>=6.0
+scipy>=1.9.0
+pyarrow>=10.0.0
+# --- RL Framework ---
+stable-baselines3>=1.7.0 # PyTorch installed separately for GPU support
+# --- Quant/Reporting ---
+quantstats>=0.0.60
+matplotlib>=3.6.0
+# --- Data Sources ---
+yfinance>=0.2.12
+# fredapi>=0.5.0
+beautifulsoup4>=4.11.1
+lxml>=4.9.1
+# --- Broker ---
+# schwab-py
+# --- Technical Analysis ---
+pandas-ta>=0.3.14b0
+
+# Note: PyTorch + CUDA must be installed separately using the command from pytorch.org
