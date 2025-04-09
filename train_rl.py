@@ -1,9 +1,11 @@
 import pandas as pd
 import numpy as np
 import torch # Import torch
+import yfinance as yf # Import yfinance
 from stable_baselines3 import PPO, SAC, A2C # Choose your algorithm
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
 from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.utils import set_random_seed # For seeding envs if needed
 import logging
 import os
 import time
@@ -15,26 +17,56 @@ from trading_env import StockTradingEnv
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+
+def get_market_caps(tickers, delay=config.MARKET_CAP_FETCH_DELAY):
+    """
+    Fetches current market capitalization for a list of tickers using yfinance.
+
+    Args:
+        tickers (list): List of stock ticker symbols.
+        delay (float): Seconds to wait between API calls to avoid rate limits.
+
+    Returns:
+        dict: Dictionary mapping ticker symbols to their market cap (or 0 if unavailable/error).
+    """
+    logging.info(f"Fetching market caps for {len(tickers)} tickers...")
+    market_caps = {}
+    count = 0
+    total = len(tickers)
+    for ticker in tickers:
+        count += 1
+        logging.debug(f"Fetching market cap for {ticker} ({count}/{total})")
+        try:
+            stock_info = yf.Ticker(ticker).info
+            cap = stock_info.get('marketCap', 0) # Get marketCap, default to 0 if missing
+            if cap is None: # Sometimes 'marketCap' key exists but value is None
+                 cap = 0
+            market_caps[ticker] = int(cap) # Store as int
+            time.sleep(delay) # Wait to avoid rate limiting
+        except Exception as e:
+            logging.warning(f"Could not fetch info/market cap for {ticker}: {e}")
+            market_caps[ticker] = 0 # Assign 0 on error
+    logging.info(f"Finished fetching market caps. Found caps for {sum(1 for cap in market_caps.values() if cap > 0)} tickers.")
+    return market_caps
+
+
 def make_env(rank, seed=0, features_dict=None, stock_tickers=None):
-    """
-    Utility function for multiprocessed envs.
-    :param rank: (int) index of the subprocess
-    :param seed: (int) the initial seed for RNG (Note: Seeding might need adjustment for full reproducibility in multiprocessing)
-    :param features_dict: Dictionary of feature dataframes
-    :param stock_tickers: List of tickers to use in this env instance
-    """
+    """Utility function for multiprocessed envs."""
     def _init():
-        # Pass only the required features and tickers to the environment instance
         env_features = {ticker: features_dict[ticker] for ticker in stock_tickers if ticker in features_dict}
         env = StockTradingEnv(features_dict=env_features, stock_tickers=stock_tickers,
                               lookback_window=config.LOOKBACK_WINDOW)
-        # env.seed(seed + rank) # Deprecated in Gymnasium
-        # Use env.reset(seed=seed + rank) if stricter seeding per env instance is needed,
-        # but SB3 handles seeding generally well with set_random_seed.
+        # Optional: Set seed for this specific environment instance for greater reproducibility
+        # env.reset(seed=seed + rank)
         return env
-    # set_global_seeds(seed) # Deprecated
+    # Consider setting global seed if needed, though SB3 handles it via model's seed
+    # if seed is not None:
+    #    set_random_seed(seed)
     return _init
 
+# ==============================================================================
+# =========================== MAIN TRAINING SCRIPT ===========================
+# ==============================================================================
 if __name__ == "__main__":
     logging.info("--- Starting RL Agent Training ---")
     start_time = time.time()
@@ -51,41 +83,59 @@ if __name__ == "__main__":
         device = 'cpu'
     # ---------------
 
-    # 1. Load/Prepare Data
+    # 1. Load/Prepare Data (Same as before)
     sp500_tickers = utils.get_sp500_tickers()
-    # Exclude benchmark/macro from the list of stocks to generate features for
     stock_tickers = [t for t in sp500_tickers
                      if t not in config.MACRO_FEATURES.values()
                      and t != config.BENCHMARK_TICKER]
 
     logging.info("Loading/Generating Features for Training Period...")
-    # Generate features for ALL potentially tradable stocks first
     features = feature_engineer.create_feature_dataset(stock_tickers, config.START_DATE, config.END_DATE_TRAIN)
 
     if not features:
          logging.error("Feature generation failed or produced no results. Cannot train.")
-         exit(1) # Use non-zero exit code for errors
+         exit(1)
 
-    # Get the list of tickers for which features were successfully generated
-    valid_tickers = sorted(list(features.keys())) # Sort for consistency
+    valid_tickers = sorted(list(features.keys())) # Tickers with successful features
     if not valid_tickers:
          logging.error("No valid tickers after feature generation. Cannot train.")
          exit(1)
     logging.info(f"Feature generation successful for {len(valid_tickers)} tickers initially.")
 
 
-    # --- Option 1 Implementation: Limit the number of tickers for training ---
-    MAX_TICKERS_FOR_TRAINING = 100 # Configurable: Set max number of stocks for training (e.g., 50, 100)
-    if len(valid_tickers) > MAX_TICKERS_FOR_TRAINING:
-        logging.warning(f"Limiting training tickers from {len(valid_tickers)} to {MAX_TICKERS_FOR_TRAINING} based on config/stability.")
-        # Simple approach: take the first N alphabetically after sorting
-        final_training_tickers = valid_tickers[:MAX_TICKERS_FOR_TRAINING]
-        # More advanced: Sort by data length, market cap (if available), etc. before slicing
-    else:
-        # Use all tickers if fewer than the limit were successfully processed
+    # --- Option 1 Modification: Limit tickers based on Market Cap ---
+    MAX_TICKERS_FOR_TRAINING = 100 # Configurable: Set max number of stocks for training
+    final_training_tickers = []
+
+    if len(valid_tickers) <= MAX_TICKERS_FOR_TRAINING:
+        # Use all valid tickers if fewer than or equal to the limit
+        logging.info(f"Using all {len(valid_tickers)} valid tickers as it's less than/equal to the limit ({MAX_TICKERS_FOR_TRAINING}).")
         final_training_tickers = valid_tickers
+    else:
+        logging.warning(f"Selecting top {MAX_TICKERS_FOR_TRAINING} tickers from {len(valid_tickers)} based on current market cap.")
+
+        # Fetch market caps for all valid tickers
+        market_caps = get_market_caps(valid_tickers) # Returns dict {ticker: cap_value_or_0}
+
+        # Create a list of tuples (ticker, market_cap)
+        ticker_cap_list = [(ticker, market_caps.get(ticker, 0)) for ticker in valid_tickers]
+
+        # Sort the list by market cap in descending order (highest first)
+        ticker_cap_list.sort(key=lambda item: item[1], reverse=True)
+
+        # Select the top N tickers from the sorted list
+        final_training_tickers = [item[0] for item in ticker_cap_list[:MAX_TICKERS_FOR_TRAINING]]
+
+        logging.info(f"Selected top {len(final_training_tickers)} tickers based on market cap. Example: {final_training_tickers[:10]}")
+        # Log tickers with zero market cap if any were included (shouldn't be if MAX_TICKERS is less than total)
+        zero_cap_selected = [item[0] for item in ticker_cap_list[:MAX_TICKERS_FOR_TRAINING] if item[1] <= 0]
+        if zero_cap_selected:
+             logging.warning(f"Tickers selected with zero/missing market cap: {zero_cap_selected}")
     # ----------------------------------------------------------------------
 
+    if not final_training_tickers:
+         logging.error("No tickers selected for training after filtering. Exiting.")
+         exit(1)
 
     logging.info(f"Using {len(final_training_tickers)} tickers for training environment.")
     # Filter the features dictionary to include only the selected tickers for the env
@@ -93,48 +143,39 @@ if __name__ == "__main__":
 
 
     # 2. Create Environment(s)
-    # Pass the filtered features and the final list of tickers
     logging.info(f"Creating training environment(s)... N_ENVS={config.N_ENVS}")
-    # Use a list comprehension to create environment functions
     env_fns = [make_env(i, features_dict=training_features, stock_tickers=final_training_tickers) for i in range(config.N_ENVS)]
 
     if config.N_ENVS > 1:
-        # Consider SubprocVecEnv if N_ENVS > 1, especially on multi-core CPUs
-        # Be mindful of potential GPU memory issues if using SubprocVecEnv with device='cuda'
         if device == 'cuda':
              logging.warning(f"Using SubprocVecEnv (N_ENVS={config.N_ENVS}) with GPU. Monitor memory usage.")
         env = SubprocVecEnv(env_fns)
     else:
-        # Use DummyVecEnv if N_ENVS=1 or for simpler debugging
         env = DummyVecEnv(env_fns)
 
 
-    # 3. Setup RL Agent - Specify the device!
+    # 3. Setup RL Agent
     tensorboard_log_dir = "./tensorboard_logs/"
     logging.info(f"Setting up RL Agent ({config.RL_ALGORITHM}) on device: {device}")
-    # Ensure the directory exists
     os.makedirs(tensorboard_log_dir, exist_ok=True)
 
     try:
         if config.RL_ALGORITHM == "PPO":
              model_params = config.PPO_PARAMS
              model = PPO('MlpPolicy', env, verbose=1,
-                         device=device, # <<< SPECIFY GPU or CPU
+                         device=device,
                          tensorboard_log=tensorboard_log_dir, **model_params)
         elif config.RL_ALGORITHM == "SAC":
-             # Add SAC params to config if needed
              model = SAC('MlpPolicy', env, verbose=1,
-                         device=device, # <<< SPECIFY GPU or CPU
+                         device=device,
                          tensorboard_log=tensorboard_log_dir)
         elif config.RL_ALGORITHM == "A2C":
-             # Add A2C params to config if needed
              model = A2C('MlpPolicy', env, verbose=1,
-                         device=device, # <<< SPECIFY GPU or CPU
+                         device=device,
                          tensorboard_log=tensorboard_log_dir)
         else:
-             logging.error(f"Unsupported RL Algorithm: {config.RL_ALGORITHM}")
-             env.close()
-             exit(1)
+             raise ValueError(f"Unsupported RL Algorithm: {config.RL_ALGORITHM}") # Raise error for unsupported algo
+
     except Exception as e:
          logging.error(f"Error initializing RL model: {e}", exc_info=True)
          env.close()
@@ -142,36 +183,39 @@ if __name__ == "__main__":
 
     logging.info(f"RL Algorithm: {config.RL_ALGORITHM}")
     logging.info(f"Model Policy Architecture: {model.policy}")
-    # Verify the device the model is actually on
     try:
         logging.info(f"Model running on device: {model.device}")
     except AttributeError:
         logging.warning("Could not verify model.device attribute.")
 
 
-    # 4. Setup Callbacks (Optional but Recommended)
-    # Save a checkpoint periodically
+    # 4. Setup Callbacks
     checkpoint_callback = CheckpointCallback(
-        save_freq=max(config.TRAIN_TIMESTEPS // 10, 10000), # Save roughly 10 times or every 10k steps
+        save_freq=max(config.TRAIN_TIMESTEPS // 10, 10000),
         save_path=config.MODELS_DIR,
         name_prefix=f"rl_model_{config.RL_ALGORITHM.lower()}",
-        save_replay_buffer=True, # Important for off-policy algorithms like SAC
-        save_vecnormalize=True, # Save running mean/std if using VecNormalize wrapper
+        save_replay_buffer=True,
+        save_vecnormalize=True,
     )
 
     # 5. Train the Agent
     logging.info(f"Starting training for {config.TRAIN_TIMESTEPS} timesteps...")
     try:
-         # The learn method handles interaction with the environment(s)
          model.learn(
              total_timesteps=config.TRAIN_TIMESTEPS,
              callback=checkpoint_callback,
-             tb_log_name=f"{config.RL_ALGORITHM}_{int(time.time())}", # Unique name for TensorBoard run
-             reset_num_timesteps=False # Continue timestep count if loading a model
+             tb_log_name=f"{config.RL_ALGORITHM}_{int(time.time())}",
+             reset_num_timesteps=False
              )
+         # --- Save final model after successful training ---
+         logging.info(f"Training finished. Saving final model to {config.MODEL_FILENAME}")
+         model.save(config.MODEL_FILENAME)
+         training_successful = True
+
     except Exception as e:
          logging.error(f"Error during training: {e}", exc_info=True)
-         # Attempt to save intermediate model even on error?
+         training_successful = False
+         # Attempt to save intermediate model on error
          try:
               intermediate_save_path = os.path.join(config.MODELS_DIR, f"rl_model_{config.RL_ALGORITHM.lower()}_error_save.zip")
               model.save(intermediate_save_path)
@@ -179,27 +223,21 @@ if __name__ == "__main__":
          except Exception as save_e:
               logging.error(f"Could not save model on error: {save_e}")
     finally:
-         # Make sure to close the environments to release resources
          logging.info("Closing training environment(s)...")
          env.close()
 
-
-    # 6. Save the Final Model (If training completed without error)
-    # This might be redundant if the last CheckpointCallback saved, but good practice.
-    if 'model' in locals(): # Check if model was successfully initialized
-        try:
-             logging.info(f"Saving final trained model to {config.MODEL_FILENAME}")
-             model.save(config.MODEL_FILENAME)
-        except Exception as e:
-             logging.error(f"Failed to save final model: {e}")
-
     end_time = time.time()
-    logging.info(f"--- RL Agent Training Completed in {(end_time - start_time)/60:.2f} minutes ---")
+    logging.info(f"--- RL Agent Training process {( 'Completed' if training_successful else 'Aborted' )} in {(end_time - start_time)/60:.2f} minutes ---")
 
-    # Optional: Suggest next steps
-    print("\nTraining finished.")
-    print(f"Model saved as: {config.MODEL_FILENAME}")
-    print("Next steps suggestion:")
-    print("1. Evaluate the model using backtester.py")
-    print(f"2. Analyze TensorBoard logs: `tensorboard --logdir {tensorboard_log_dir}`")
-    print("3. Fine-tune hyperparameters (e.g., PPO_PARAMS in config.py) and retrain if necessary.")
+    # --- Final Messages ---
+    if training_successful:
+        print("\nTraining finished successfully.")
+        print(f"Model saved as: {config.MODEL_FILENAME}")
+        print("Next steps suggestion:")
+        print("1. Evaluate the model using backtester.py")
+        print(f"2. Analyze TensorBoard logs: `tensorboard --logdir {tensorboard_log_dir}`")
+        print("3. Fine-tune hyperparameters (e.g., PPO_PARAMS in config.py) and retrain if necessary.")
+    else:
+        print("\nTraining aborted due to an error.")
+        print("Check the log file for details.")
+        exit(1) # Exit with error status
