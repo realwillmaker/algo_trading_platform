@@ -7,6 +7,7 @@ scipy>=1.9.0
 pyarrow>=10.0.0
 # --- RL Framework ---
 stable-baselines3>=1.7.0 # PyTorch installed separately for GPU support
+tensorboard>=2.10.0
 # --- Quant/Reporting ---
 quantstats>=0.0.60
 matplotlib>=3.6.0
