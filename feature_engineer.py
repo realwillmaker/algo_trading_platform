@@ -150,31 +150,60 @@ def create_feature_dataset(tickers, start_date, end_date):
     """Creates the final feature dataset for all tickers."""
     logging.info("--- Starting Feature Engineering Process ---")
     all_features = {}
-    macro_data = utils.load_data_from_file("_macro_data")
+    macro_data = utils.load_data_from_file("_macro_data") # Load macro data
+
     if macro_data is not None:
         macro_data.index = pd.to_datetime(macro_data.index)
-        logging.info("Loaded macro data.")
-    else:
-        # Handle case where macro data failed to download
-        logging.warning("Macro data file not found or empty. Proceeding without macro features.")
-        macro_data = pd.DataFrame() # Use empty DataFrame
+        logging.info(f"Loaded macro data. Shape: {macro_data.shape}, Index Type: {type(macro_data.index)}, Columns: {macro_data.columns}")
 
+        # --- FIX: Check for and handle MultiIndex columns ---
+        if isinstance(macro_data.columns, pd.MultiIndex):
+            logging.warning("Macro data columns are MultiIndex. Attempting to flatten.")
+            # Example: Keep only the first level (assuming it's the feature name like 'VIX')
+            macro_data.columns = macro_data.columns.get_level_values(0)
+            # Remove duplicate columns if flattening created them (e.g., multiple 'Close')
+            macro_data = macro_data.loc[:,~macro_data.columns.duplicated()]
+            logging.info(f"Flattened macro data columns: {macro_data.columns}")
+        # --- END FIX ---
+
+        # Check if index is also MultiIndex (less likely but possible)
+        if isinstance(macro_data.index, pd.MultiIndex):
+             logging.warning("Macro data index is MultiIndex. This is unexpected. Attempting to reset index.")
+             # This might lose date information if not handled carefully
+             # Depending on structure, might need .reset_index(level=...) or other logic
+             # For now, log a strong warning as this indicates a deeper issue
+             logging.error("Macro data has MultiIndex on rows. Merge will likely fail or be incorrect. Please check _macro_data.parquet structure.")
+             # Set to empty DataFrame to prevent merge errors, but features will be missing
+             macro_data = pd.DataFrame()
+
+
+        # Drop any potential all-NaN columns that might result from loading/flattening
+        macro_data = macro_data.dropna(axis=1, how='all')
+
+        if macro_data.empty:
+             logging.warning("Macro data became empty after processing MultiIndex or NaNs. Proceeding without macro features.")
+
+    else:
+        # Handle case where macro data file doesn't exist or is empty from the start
+        logging.warning("Macro data file not found or empty. Proceeding without macro features.")
+        macro_data = pd.DataFrame() # Use empty DataFrame to allow processing to continue
+
+
+    # --- Rest of the function remains the same ---
     for ticker in tickers:
         logging.debug(f"Processing features for {ticker}...")
-        processed_df = preprocess_data_for_ticker(ticker, macro_data) # Pass empty df if no macro data
+        # Pass the processed (or empty) macro_data DataFrame
+        processed_df = preprocess_data_for_ticker(ticker, macro_data)
         if processed_df is not None and not processed_df.empty:
-            processed_df_filtered = processed_df.loc[start_date:end_date].copy() # Use .copy() to avoid SettingWithCopyWarning
+            processed_df_filtered = processed_df.loc[start_date:end_date].copy()
             if not processed_df_filtered.empty:
-                 # Ensure all feature columns are numeric, convert if necessary
                  feature_cols = [col for col in processed_df_filtered.columns if col not in ['Open', 'High', 'Low', 'Close', 'Volume', 'log_return']]
                  for col in feature_cols:
                       processed_df_filtered[col] = pd.to_numeric(processed_df_filtered[col], errors='coerce')
-                 # Check for NaNs introduced by coercion
                  if processed_df_filtered[feature_cols].isnull().any().any():
                       nan_cols = processed_df_filtered[feature_cols].isnull().any()
                       logging.warning(f"NaNs found in feature columns for {ticker} after to_numeric coercion: {nan_cols[nan_cols].index.tolist()}. Filling with 0.")
-                      # Option: Fill NaNs (e.g., with 0 or forward fill) or drop rows/ticker
-                      processed_df_filtered[feature_cols] = processed_df_filtered[feature_cols].fillna(0) # Example: Fill with 0
+                      processed_df_filtered[feature_cols] = processed_df_filtered[feature_cols].fillna(0)
 
                  all_features[ticker] = processed_df_filtered
                  logging.debug(f"Finished features for {ticker}, shape: {processed_df_filtered.shape}")
@@ -182,6 +211,14 @@ def create_feature_dataset(tickers, start_date, end_date):
                  logging.warning(f"No data remaining for {ticker} after date filtering {start_date} to {end_date}.")
         else:
              logging.warning(f"Skipping {ticker} due to processing issues or lack of data.")
+
+
+    if not all_features:
+         logging.error("No features were generated for any ticker. Exiting.")
+         return None
+
+    logging.info(f"--- Feature Engineering Completed for {len(all_features)} tickers ---")
+    return all_features
 
 
     if not all_features:
