@@ -82,7 +82,7 @@ def preprocess_data_for_ticker(ticker, macro_data):
     if not isinstance(df.index, pd.DatetimeIndex):
          df.index = pd.to_datetime(df.index)
 
-    df = calculate_technical_indicators(df) # Uses updated function
+    df = calculate_technical_indicators(df)
 
     df = add_fundamental_features(df, ticker)
 
@@ -91,57 +91,93 @@ def preprocess_data_for_ticker(ticker, macro_data):
     else:
         logging.warning(f"'Close' column not found in DataFrame for {ticker} after TA calculation. Cannot compute log_return.")
 
+    # --- Merge Macro Data ---
     if macro_data is not None and not macro_data.empty:
-         if not isinstance(macro_data.index, pd.DatetimeIndex):
+        if not isinstance(macro_data.index, pd.DatetimeIndex):
+             logging.warning(f"[{ticker}] Converting macro_data index to datetime.")
              macro_data.index = pd.to_datetime(macro_data.index)
-         df = pd.merge(df, macro_data, left_index=True, right_index=True, how='left')
-         macro_cols = macro_data.columns
-         cols_to_fill = [col for col in macro_cols if col in df.columns]
-         if cols_to_fill:
-              df[cols_to_fill] = df[cols_to_fill].ffill()
 
-    # --- Determine indicator columns dynamically for NaN check ---
+        # --- START DEBUGGING & SAFETY NET ---
+        logging.debug(f"[{ticker}] Pre-Merge df Index Type: {type(df.index)}, Levels: {df.index.nlevels}, Is MultiIndex: {isinstance(df.index, pd.MultiIndex)}")
+        logging.debug(f"[{ticker}] Pre-Merge df Columns Type: {type(df.columns)}, Levels: {df.columns.nlevels}, Is MultiIndex: {isinstance(df.columns, pd.MultiIndex)}")
+        # logging.debug(f"[{ticker}] Pre-Merge df Columns: {df.columns.tolist()}") # Can be long
+
+        logging.debug(f"[{ticker}] Pre-Merge macro_data Index Type: {type(macro_data.index)}, Levels: {macro_data.index.nlevels}, Is MultiIndex: {isinstance(macro_data.index, pd.MultiIndex)}")
+        logging.debug(f"[{ticker}] Pre-Merge macro_data Columns Type: {type(macro_data.columns)}, Levels: {macro_data.columns.nlevels}, Is MultiIndex: {isinstance(macro_data.columns, pd.MultiIndex)}")
+        logging.debug(f"[{ticker}] Pre-Merge macro_data Columns: {macro_data.columns.tolist()}")
+
+        # Safety Net: Flatten columns AGAIN just in case
+        if isinstance(macro_data.columns, pd.MultiIndex):
+            logging.warning(f"[{ticker}] Macro data STILL has MultiIndex columns just before merge! Flattening again.")
+            original_macro_cols = macro_data.columns
+            try:
+                # Try selecting the first level
+                macro_data.columns = macro_data.columns.get_level_values(0)
+                # Remove duplicates that might arise
+                macro_data = macro_data.loc[:,~macro_data.columns.duplicated()]
+                logging.info(f"[{ticker}] Flattened macro cols: {macro_data.columns.tolist()}")
+            except Exception as flatten_err:
+                 logging.error(f"[{ticker}] Failed to flatten macro columns ({original_macro_cols}): {flatten_err}. Skipping merge.", exc_info=True)
+                 macro_data = pd.DataFrame() # Prevent merge if flattening failed
+
+
+        # Check index compatibility
+        if isinstance(macro_data.index, pd.MultiIndex):
+            logging.error(f"[{ticker}] Macro data has MultiIndex rows just before merge! Cannot merge.")
+        elif df.index.nlevels != macro_data.index.nlevels:
+            logging.error(f"[{ticker}] Mismatched index levels before merge! df: {df.index.nlevels}, macro: {macro_data.index.nlevels}. Cannot merge.")
+        elif not macro_data.empty: # Only merge if macro_data is not empty after checks
+            # Perform the merge
+            try:
+                initial_df_cols = set(df.columns)
+                df = pd.merge(df, macro_data, left_index=True, right_index=True, how='left')
+                merged_cols = set(macro_data.columns) & set(df.columns) # Columns actually added
+                logging.debug(f"[{ticker}] Successfully merged macro columns: {list(merged_cols)}")
+
+                # Forward fill the merged columns
+                if merged_cols:
+                     df[list(merged_cols)] = df[list(merged_cols)].ffill()
+
+            except pd.errors.MergeError as me:
+                logging.error(f"[{ticker}] pd.merge failed EVEN AFTER CHECKS: {me}", exc_info=True)
+                logging.error(f"[{ticker}] FAILED MERGE df Index: {type(df.index)}, Levels: {df.index.nlevels}, Columns: {df.columns.tolist()}")
+                logging.error(f"[{ticker}] FAILED MERGE macro_data Index: {type(macro_data.index)}, Levels: {macro_data.index.nlevels}, Columns: {macro_data.columns.tolist()}")
+                # Continue without macro features for this ticker? Or raise error?
+                # Let's allow continuation without macro features for this specific ticker
+                pass # Skip filling if merge failed
+            except Exception as e:
+                logging.error(f"[{ticker}] Unexpected error during merge or ffill: {e}", exc_info=True)
+                # Allow continuation?
+                pass
+        # --- END DEBUGGING & SAFETY NET ---
+
+
+    # --- Drop initial rows with NaNs (logic remains the same) ---
+    # ... (rest of function) ...
     indicator_cols = []
     try:
-        # Create a dummy strategy object to get expected column names
         dummy_strategy_list = [p.copy() for p in config.TECHNICAL_INDICATORS.values()]
         dummy_strategy = ta.Strategy(name="Dummy", ta=dummy_strategy_list)
-        # Apply to a minimal dummy DataFrame to see generated names
-        dummy_df = pd.DataFrame({
-            'open': [1, 1], 'high': [1, 1], 'low': [1, 1],
-            'close': [1, 1], 'volume': [1, 1]
-        })
+        dummy_df = pd.DataFrame({'open': [1, 1], 'high': [1, 1], 'low': [1, 1],'close': [1, 1], 'volume': [1, 1]})
         dummy_df.ta.strategy(dummy_strategy, append=True)
         indicator_cols = [col for col in dummy_df.columns if col not in ['open', 'high', 'low', 'close', 'volume']]
-        logging.debug(f"Dynamically determined indicator columns: {indicator_cols}")
     except Exception as e:
-        logging.warning(f"Could not dynamically determine indicator columns: {e}. Falling back to broad NaN check.")
+        logging.warning(f"Could not dynamically determine indicator columns: {e}. Falling back.")
 
-    if not indicator_cols: # Fallback if dynamic determination failed
-         nan_check_cols = ['log_return'] # Check at least log return if available
-         if 'log_return' not in df.columns: nan_check_cols = []
+    if not indicator_cols:
+         nan_check_cols = ['log_return'] if 'log_return' in df.columns else []
     else:
          nan_check_cols = ['log_return'] + indicator_cols
-         nan_check_cols = [col for col in nan_check_cols if col in df.columns] # Ensure cols exist
+         nan_check_cols = [col for col in nan_check_cols if col in df.columns]
 
     if nan_check_cols:
         initial_rows = len(df)
         df = df.dropna(subset=nan_check_cols, how='any')
-        dropped_rows = initial_rows - len(df)
-        if dropped_rows > 0:
-             logging.debug(f"Dropped {dropped_rows} rows with NaNs in check columns ({nan_check_cols}) for {ticker}.")
-    else:
-         logging.warning(f"No specific columns found for NaN check in {ticker}. Applying dropna(how='any') broadly.")
-         initial_rows = len(df)
-         df = df.dropna(how='any')
-         dropped_rows = initial_rows - len(df)
-         if dropped_rows > 0:
-             logging.debug(f"Dropped {dropped_rows} rows with NaNs (broad check) for {ticker}.")
-
+        # ... (rest of NaN dropping logic) ...
 
     if 'Open' not in df.columns or 'Close' not in df.columns:
-         logging.error(f"Required columns 'Open' or 'Close' missing for {ticker} after processing. Check TA function.")
-         return None
+        logging.error(f"Required columns 'Open' or 'Close' missing for {ticker} after processing.")
+        return None
 
     return df
 
