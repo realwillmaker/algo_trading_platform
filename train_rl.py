@@ -17,39 +17,6 @@ from trading_env import StockTradingEnv
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-
-def get_market_caps(tickers, delay=config.MARKET_CAP_FETCH_DELAY):
-    """
-    Fetches current market capitalization for a list of tickers using yfinance.
-
-    Args:
-        tickers (list): List of stock ticker symbols.
-        delay (float): Seconds to wait between API calls to avoid rate limits.
-
-    Returns:
-        dict: Dictionary mapping ticker symbols to their market cap (or 0 if unavailable/error).
-    """
-    logging.info(f"Fetching market caps for {len(tickers)} tickers...")
-    market_caps = {}
-    count = 0
-    total = len(tickers)
-    for ticker in tickers:
-        count += 1
-        logging.debug(f"Fetching market cap for {ticker} ({count}/{total})")
-        try:
-            stock_info = yf.Ticker(ticker).info
-            cap = stock_info.get('marketCap', 0) # Get marketCap, default to 0 if missing
-            if cap is None: # Sometimes 'marketCap' key exists but value is None
-                 cap = 0
-            market_caps[ticker] = int(cap) # Store as int
-            time.sleep(delay) # Wait to avoid rate limiting
-        except Exception as e:
-            logging.warning(f"Could not fetch info/market cap for {ticker}: {e}")
-            market_caps[ticker] = 0 # Assign 0 on error
-    logging.info(f"Finished fetching market caps. Found caps for {sum(1 for cap in market_caps.values() if cap > 0)} tickers.")
-    return market_caps
-
-
 def make_env(rank, seed=0, features_dict=None, stock_tickers=None):
     """Utility function for multiprocessed envs."""
     def _init():
@@ -115,7 +82,8 @@ if __name__ == "__main__":
         logging.warning(f"Selecting top {MAX_TICKERS_FOR_TRAINING} tickers from {len(valid_tickers)} based on current market cap.")
 
         # Fetch market caps for all valid tickers
-        market_caps = get_market_caps(valid_tickers) # Returns dict {ticker: cap_value_or_0}
+        #market_caps = get_market_caps(valid_tickers) # Returns dict {ticker: cap_value_or_0}
+        market_caps = utils.get_market_caps(valid_tickers) # NEW (using definition from utils)
 
         # Create a list of tuples (ticker, market_cap)
         ticker_cap_list = [(ticker, market_caps.get(ticker, 0)) for ticker in valid_tickers]
