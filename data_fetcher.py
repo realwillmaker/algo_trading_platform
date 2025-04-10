@@ -249,7 +249,7 @@ if __name__ == "__main__":
     # Determine overall date range needed (training start to "yesterday")
     fetch_start = config.START_DATE
     # Ensure end_date is calculated correctly relative to 'now'
-    fetch_end = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+    fetch_end = datetime.now().strftime('%Y-%m-%d')
     logging.info(f"Data fetch range: {fetch_start} to {fetch_end}")
 
 
