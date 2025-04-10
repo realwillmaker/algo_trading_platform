@@ -42,131 +42,91 @@ logger.addHandler(stream_handler)
 def get_latest_features(tickers):
     """Generates features using data up to the latest available day."""
     logging.info("Generating latest features...")
-    # --- INCREASE BUFFER SLIGHTLY ---
-    buffer_days = 45 # Increased from 35, adjust if needed
+    buffer_days = 45
     end_date = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
     start_date = (pd.to_datetime(end_date) - pd.Timedelta(days=config.LOOKBACK_WINDOW + buffer_days)).strftime('%Y-%m-%d')
     logging.info(f"Feature calculation range for job: {start_date} to {end_date}")
-    # -----------------------------
 
-    # Generate features for the required range
     features = feature_engineer.create_feature_dataset(tickers, start_date, end_date)
     if not features:
-         raise RuntimeError("Failed to generate features for latest data (create_feature_dataset returned None or empty).")
+         raise RuntimeError("Failed to generate features for latest data.")
 
-    latest_features_dict = {}
-    latest_common_date = None
-    common_dates = None
-    valid_tickers = sorted(list(features.keys())) # Tickers where feature gen succeeded
+    # Find the latest date present across *any* ticker (more robust than common date)
+    latest_date_overall = None
+    valid_tickers_initial = []
+    for ticker, df_ticker in features.items():
+        if df_ticker is not None and not df_ticker.empty:
+            if not isinstance(df_ticker.index, pd.DatetimeIndex):
+                 try: df_ticker.index = pd.to_datetime(df_ticker.index)
+                 except Exception: continue # Skip if index conversion fails
+            if df_ticker.index.tz is not None: df_ticker.index = df_ticker.index.tz_localize(None)
 
-    if not valid_tickers:
-        raise RuntimeError("Feature generation succeeded but produced an empty dictionary.")
+            valid_tickers_initial.append(ticker)
+            current_max_date = df_ticker.index.max()
+            if latest_date_overall is None or current_max_date > latest_date_overall:
+                latest_date_overall = current_max_date
 
-    # --- Find common dates across generated features ---
-    logging.debug(f"Finding common dates across {len(valid_tickers)} tickers...")
-    for ticker in valid_tickers:
-        df_ticker = features[ticker]
-        if df_ticker is None or df_ticker.empty:
-             logging.warning(f"Feature dictionary contains None or empty DataFrame for {ticker}. Skipping for common date calculation.")
-             continue # Skip this ticker if data is bad
+    if latest_date_overall is None:
+         raise RuntimeError("Could not determine any latest date from generated features.")
+    logging.info(f"Latest date found across any feature set: {latest_date_overall.strftime('%Y-%m-%d')}")
+    # Use this latest date as the reference point
+    latest_feature_date = latest_date_overall
 
-        # Ensure index is DatetimeIndex
-        if not isinstance(df_ticker.index, pd.DatetimeIndex):
-             logging.warning(f"Converting index to DatetimeIndex for {ticker} during common date check.")
-             try:
-                 df_ticker.index = pd.to_datetime(df_ticker.index)
-             except Exception as e:
-                 logging.error(f"Failed to convert index for {ticker}: {e}. Skipping this ticker.")
-                 continue
-
-        # Ensure timezone naive for comparison
-        if df_ticker.index.tz is not None:
-             df_ticker.index = df_ticker.index.tz_localize(None)
-
-        dates = df_ticker.index
-        if common_dates is None: common_dates = dates
-        else: common_dates = common_dates.intersection(dates)
-
-        # Check if intersection became empty - means no common dates found
-        if common_dates is not None and common_dates.empty:
-             logging.error(f"Common date intersection became empty after processing ticker {ticker}.")
-             break # No need to check further
-
-
-    if common_dates is None or common_dates.empty:
-        raise RuntimeError("No common dates found in the latest feature set across tickers.")
-    # -----------------------------------------------
-
-    latest_common_date = max(common_dates)
-    # --- ADD LOGGING ---
-    logging.info(f"Latest common date with features determined as: {latest_common_date.strftime('%Y-%m-%d')}")
-    # -------------------
-
-    # Check how recent the data is
-    if latest_common_date.date() < (datetime.now() - timedelta(days=4)).date(): # Increased tolerance
-         logging.warning(f"Latest feature date {latest_common_date.strftime('%Y-%m-%d')} seems old. Data might be stale.")
-
-    # Define the specific lookback window range ending on the common date
-    lookback_start_date = latest_common_date - pd.Timedelta(days=config.LOOKBACK_WINDOW - 1)
-    # --- ADD LOGGING ---
-    logging.info(f"Required lookback range for final state: {lookback_start_date.strftime('%Y-%m-%d')} to {latest_common_date.strftime('%Y-%m-%d')}")
-    # -------------------
 
     processed_features_for_state = {}
-    final_valid_tickers = [] # Tickers that meet the final lookback length requirement
+    final_valid_tickers = []
 
-    # --- Check lookback window length for each ticker ---
-    logging.debug("Checking final lookback window length for each ticker...")
-    for ticker in valid_tickers:
-         # Skip if features dict doesn't contain the ticker (shouldn't happen if valid_tickers is from keys)
-         if ticker not in features: continue
-
+    # --- Check lookback window by taking the LAST N rows ---
+    logging.debug(f"Selecting last {config.LOOKBACK_WINDOW} rows for each ticker ending near {latest_feature_date.strftime('%Y-%m-%d')}...")
+    for ticker in valid_tickers_initial: # Iterate through tickers that had features generated
+         if ticker not in features: continue # Should not happen, but safety check
          ticker_features_full = features[ticker]
-         if ticker_features_full is None or ticker_features_full.empty: continue # Skip if empty df sneaked through
+         if ticker_features_full is None or ticker_features_full.empty: continue
 
-         # Slice the specific lookback window
-         try:
-              # Ensure index is datetime and timezone naive again before slicing
-              if not isinstance(ticker_features_full.index, pd.DatetimeIndex):
-                  ticker_features_full.index = pd.to_datetime(ticker_features_full.index)
-              if ticker_features_full.index.tz is not None:
-                  ticker_features_full.index = ticker_features_full.index.tz_localize(None)
+         # Ensure data is sorted by date ascending (usually is, but good practice)
+         ticker_features_full.sort_index(inplace=True)
 
-              # Slice using the calculated start/end dates
-              ticker_features_window = ticker_features_full.loc[lookback_start_date:latest_common_date]
-              actual_rows = len(ticker_features_window)
+         # Check if there are enough rows *in total*
+         if len(ticker_features_full) >= config.LOOKBACK_WINDOW:
+             # --- Select the last LOOKBACK_WINDOW rows ---
+             ticker_features_window = ticker_features_full.iloc[-config.LOOKBACK_WINDOW:]
+             # ---------------------------------------------
 
-              # --- ADD DEBUG LOG ---
-              # Log details for potentially problematic tickers or just first/last few
-              if ticker in ['ZBRA', 'ZTS', valid_tickers[0], valid_tickers[-1]]: # Example logging targets
-                  actual_start = ticker_features_window.index.min().strftime('%Y-%m-%d') if actual_rows > 0 else "N/A"
-                  actual_end = ticker_features_window.index.max().strftime('%Y-%m-%d') if actual_rows > 0 else "N/A"
-                  logging.debug(f"Checking {ticker}: Range {actual_start} to {actual_end}, Rows={actual_rows}, Required={config.LOOKBACK_WINDOW}")
-              # --- END DEBUG LOG ---
+             actual_rows = len(ticker_features_window)
+             if actual_rows == config.LOOKBACK_WINDOW: # Should always be true now if len check passed
+                 # Select feature columns (all except Open, Close)
+                 feature_cols = [col for col in ticker_features_window.columns if col not in ['Open', 'Close']]
+                 # Final check for NaNs in the selected window slice's features
+                 if ticker_features_window[feature_cols].isnull().any().any():
+                      nan_cols = ticker_features_window[feature_cols].isnull().any()
+                      logging.warning(f"NaNs found within the final lookback window's features for {ticker}: {nan_cols[nan_cols].index.tolist()}. Excluding.")
+                      continue # Skip if NaNs exist in the final slice's features
 
-              # Check if exactly the required number of rows are present
-              if actual_rows == config.LOOKBACK_WINDOW:
-                  # Select feature columns (all except Open, Close)
-                  feature_cols = [col for col in ticker_features_window.columns if col not in ['Open', 'Close']]
-                  # Final check for NaNs in the selected window slice's features
-                  if ticker_features_window[feature_cols].isnull().any().any():
-                       nan_cols = ticker_features_window[feature_cols].isnull().any()
-                       logging.warning(f"NaNs found within the final lookback window's features for {ticker}: {nan_cols[nan_cols].index.tolist()}. Excluding.")
-                       continue # Skip if NaNs exist in the final slice's features
+                 processed_features_for_state[ticker] = ticker_features_window[feature_cols]
+                 final_valid_tickers.append(ticker)
+                 # Log the date range covered by this slice for debugging
+                 actual_start = ticker_features_window.index.min().strftime('%Y-%m-%d')
+                 actual_end = ticker_features_window.index.max().strftime('%Y-%m-%d')
+                 logging.debug(f"Selected window for {ticker}: {actual_start} to {actual_end} ({actual_rows} rows)")
 
-                  processed_features_for_state[ticker] = ticker_features_window[feature_cols]
-                  final_valid_tickers.append(ticker)
-              else:
-                  # Warning already includes row count
-                  logging.warning(f"Ticker {ticker} does not have enough data ({actual_rows} rows) for the lookback window ending {latest_common_date.strftime('%Y-%m-%d')}. Excluding from prediction.")
+             # This else shouldn't be hit if the len check works, but keep as safety
+             else:
+                  logging.warning(f"Ticker {ticker} - iloc slicing failed to return {config.LOOKBACK_WINDOW} rows, got {actual_rows}. Excluding.")
 
-         except KeyError:
-              # This might happen if lookback_start_date or latest_common_date is not in the index after feature processing
-               logging.warning(f"KeyError slicing lookback window for {ticker} (Dates: {lookback_start_date} - {latest_common_date}). Maybe data gap? Excluding.")
-               continue
-         except Exception as slice_err:
-              logging.warning(f"Error slicing lookback window for {ticker}: {slice_err}. Excluding.", exc_info=True) # Log traceback for unexpected errors
-              continue # Skip ticker if slicing fails
+         else:
+              # Log tickers that don't have enough total rows
+              logging.warning(f"Ticker {ticker} only has {len(ticker_features_full)} total rows, less than lookback {config.LOOKBACK_WINDOW}. Excluding.")
+
+
+    # --- Final Check ---
+    if not final_valid_tickers:
+         logging.error(f"Failed to find *any* tickers with at least {config.LOOKBACK_WINDOW} data points.")
+         raise RuntimeError("No tickers had sufficient data points for the lookback window.")
+
+    logging.info(f"Features ready for state construction for {len(final_valid_tickers)} tickers.")
+    # Return the features dict containing DFs of shape (lookback_window, n_features),
+    # the list of tickers included, and the latest date used as reference.
+    return processed_features_for_state, final_valid_tickers, latest_feature_date
 
     # --- Final Check ---
     if not final_valid_tickers:
