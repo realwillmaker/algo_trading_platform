@@ -16,47 +16,6 @@ from trading_env import StockTradingEnv # Use the env for simulation logic
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# --- Copy Market Cap Function from train_rl.py ---
-def get_market_caps(tickers, delay=config.MARKET_CAP_FETCH_DELAY):
-    """
-    Fetches current market capitalization for a list of tickers using yfinance.
-
-    Args:
-        tickers (list): List of stock ticker symbols.
-        delay (float): Seconds to wait between API calls to avoid rate limits.
-
-    Returns:
-        dict: Dictionary mapping ticker symbols to their market cap (or 0 if unavailable/error).
-    """
-    logging.info(f"Fetching market caps for {len(tickers)} tickers (for backtest selection)...")
-    market_caps = {}
-    count = 0
-    total = len(tickers)
-    for ticker in tickers:
-        count += 1
-        logging.debug(f"Fetching market cap for {ticker} ({count}/{total})")
-        try:
-            # Check if ticker symbol seems valid before fetching
-            if not isinstance(ticker, str) or not ticker or ticker.startswith("^"): # Basic check
-                 logging.warning(f"Skipping potentially invalid ticker for market cap: {ticker}")
-                 market_caps[ticker] = 0
-                 continue
-
-            stock_info = yf.Ticker(ticker).info
-            cap = stock_info.get('marketCap', 0) # Get marketCap, default to 0 if missing
-            if cap is None: # Sometimes 'marketCap' key exists but value is None
-                 cap = 0
-            market_caps[ticker] = int(cap) # Store as int
-            time.sleep(delay) # Wait to avoid rate limiting
-        except Exception as e:
-            # More specific error logging could be useful here
-            logging.warning(f"Could not fetch info/market cap for {ticker}: {e}")
-            market_caps[ticker] = 0 # Assign 0 on error
-    logging.info(f"Finished fetching market caps. Found caps for {sum(1 for cap in market_caps.values() if cap > 0)} tickers.")
-    return market_caps
-# -----------------------------------------------
-
-
 # ==============================================================
 # ================== BACKTESTING FUNCTIONS =====================
 # ==============================================================
@@ -340,7 +299,8 @@ if __name__ == "__main__":
     else:
         # Re-select top N based on current market cap to mimic training selection
         logging.info(f"Selecting top {MAX_TICKERS_MODEL_WAS_TRAINED_ON} tickers from backtest-valid list based on market cap to match training...")
-        market_caps_backtest = get_market_caps(valid_tickers_backtest)
+        #market_caps_backtest = get_market_caps(valid_tickers_backtest)
+        market_caps_backtest = utils.get_market_caps(valid_tickers_backtest) # NEW
         ticker_cap_list_backtest = [(ticker, market_caps_backtest.get(ticker, 0)) for ticker in valid_tickers_backtest]
         ticker_cap_list_backtest.sort(key=lambda item: item[1], reverse=True)
         training_tickers = [item[0] for item in ticker_cap_list_backtest[:MAX_TICKERS_MODEL_WAS_TRAINED_ON]]
