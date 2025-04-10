@@ -5,6 +5,7 @@ import os
 import logging
 import config # For initial capital, file paths, maybe commission/slippage?
 import utils # For load/save state
+from datetime import datetime, timedelta
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(filename)s:%(lineno)d - %(message)s')
 
