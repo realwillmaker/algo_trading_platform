@@ -13,6 +13,7 @@ DATA_DIR = "data"
 MODELS_DIR = "models"
 REPORTS_DIR = "reports"
 LOG_FILE = "trading_log.log"
+PORTFOLIO_STATE_FILE = "portfolio_state.json"
 
 # --- Data ---
 DATA_PROVIDER = "yfinance"
