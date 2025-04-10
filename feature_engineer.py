@@ -110,7 +110,7 @@ def preprocess_data_for_ticker(ticker, macro_data):
         # Calculate log return, handle potential division by zero or log(0)
         df['log_return'] = np.log(df['Close'].pct_change() + 1).fillna(0) # Use pct_change() + 1 for robustness
         # Replace inf/-inf that can result from edge cases
-        df['log_return'].replace([np.inf, -np.inf], 0, inplace=True)
+        df['log_return'] = df['log_return'].replace([np.inf, -np.inf], 0)
     else:
         logging.warning(f"'Close' column not found or not numeric for {ticker}. Cannot compute log_return. Setting to 0.")
         df['log_return'] = 0.0 # Assign default value
