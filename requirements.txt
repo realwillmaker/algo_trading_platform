@@ -11,6 +11,7 @@ tensorboard>=2.10.0
 # --- Quant/Reporting ---
 quantstats>=0.0.60
 matplotlib>=3.6.0
+ipython>=8.0.0 # Add IPython dependency for quantstats reports
 # --- Data Sources ---
 yfinance>=0.2.12
 # fredapi>=0.5.0
