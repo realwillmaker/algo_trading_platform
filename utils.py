@@ -4,6 +4,8 @@ from bs4 import BeautifulSoup
 import logging
 import os
 import json
+import time         # <--- Add if not present
+import yfinance as yf # <--- Add if not present
 
 import config
 
@@ -103,6 +105,45 @@ def load_portfolio_state(filepath=config.PORTFOLIO_STATE_FILE):
     else:
         logging.warning(f"Portfolio state file {filepath} not found. Initializing with default capital.")
         return {'cash': config.INITIAL_CAPITAL, 'positions': {}} # Initial state
+
+def get_market_caps(tickers, delay=config.MARKET_CAP_FETCH_DELAY):
+    """
+    Fetches current market capitalization for a list of tickers using yfinance.
+
+    Args:
+        tickers (list): List of stock ticker symbols.
+        delay (float): Seconds to wait between API calls to avoid rate limits.
+
+    Returns:
+        dict: Dictionary mapping ticker symbols to their market cap (or 0 if unavailable/error).
+    """
+    # Check if config has the attribute, provide default if missing
+    fetch_delay = getattr(config, 'MARKET_CAP_FETCH_DELAY', 0.5) # Default 0.5s
+
+    logging.info(f"Fetching market caps for {len(tickers)} tickers...")
+    market_caps = {}
+    count = 0
+    total = len(tickers)
+    for ticker in tickers:
+        count += 1
+        # Add check for valid ticker format
+        if not isinstance(ticker, str) or not ticker or ticker.startswith("^"):
+            logging.debug(f"Skipping market cap fetch for invalid/index ticker: {ticker}")
+            market_caps[ticker] = 0
+            continue
+
+        logging.debug(f"Fetching market cap for {ticker} ({count}/{total})")
+        try:
+            stock_info = yf.Ticker(ticker).info
+            cap = stock_info.get('marketCap', 0)
+            if cap is None: cap = 0
+            market_caps[ticker] = int(cap)
+            time.sleep(fetch_delay) # Use the fetched or default delay
+        except Exception as e:
+            logging.warning(f"Could not fetch info/market cap for {ticker}: {e}")
+            market_caps[ticker] = 0
+    logging.info(f"Finished fetching market caps. Found caps for {sum(1 for cap in market_caps.values() if cap > 0)} tickers.")
+    return market_caps
 
 if __name__ == '__main__':
     # Example usage:
