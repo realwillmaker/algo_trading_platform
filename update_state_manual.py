@@ -1,4 +1,3 @@
-#update_state_manual.py
 import pandas as pd
 import numpy as np
 import json
@@ -137,8 +136,9 @@ if __name__ == "__main__":
     # 2. Load the planned trades
     orders_file = "planned_orders.json"
     if not os.path.exists(orders_file):
-        logging.info("No planned orders file found ('planned_orders.json'). Assuming no trades were needed or file is missing. State remains unchanged.")
+        logging.info("No planned orders file found ('planned_orders.json'). Assuming no trades were executed. State remains unchanged.")
         # Optional: Still save the loaded state again? Or just exit? Let's exit.
+        utils.save_portfolio_state(last_state) # Save for consistency
         exit(0)
 
     try:
@@ -155,8 +155,7 @@ if __name__ == "__main__":
     # Exit if there are no trades to apply
     if not planned_trades:
         logging.info("Planned orders file contained no trades. State remains unchanged.")
-        # Save state back for consistency even if no trades
-        utils.save_portfolio_state(last_state)
+        utils.save_portfolio_state(last_state) # Save for consistency
         try: os.remove(orders_file) # Clean up empty file
         except OSError: pass
         exit(0)
@@ -174,9 +173,11 @@ if __name__ == "__main__":
          check_date = yesterday_dt - timedelta(days=i)
          # Ensure check_date is timezone naive if data index is naive
          if check_date.tzinfo is not None: check_date = check_date.replace(tzinfo=None)
-         # Use the check_date directly (datetime object) for comparison/lookup
+         # --- Use date() object for comparison ---
+         check_date_date_obj = check_date.date()
+         # --- End Change ---
 
-         logging.debug(f"Trying to fetch prices for date: {check_date.strftime('%Y-%m-%d')}")
+         logging.debug(f"Trying to fetch prices for date: {check_date_date_obj.strftime('%Y-%m-%d')}")
          all_prices_found = True
          temp_prices = {}
          missing_ticker_on_date = None # Track which ticker failed
@@ -190,36 +191,57 @@ if __name__ == "__main__":
                       except Exception as e: logging.warning(f"Could not convert index for {ticker} to datetime: {e}"); all_prices_found=False; missing_ticker_on_date=f"{ticker} (Index Error)"; break
                   if price_data.index.tz is not None: price_data.index = price_data.index.tz_localize(None)
 
-                  # Use the datetime object check_date for index lookup
-                  if check_date in price_data.index:
-                       # Check if 'Close' column exists
-                       if 'Close' not in price_data.columns:
-                           logging.warning(f"'Close' column missing for {ticker}. Skipping price check.")
-                           all_prices_found = False; missing_ticker_on_date = f"{ticker} (No Close Col)"; break
-                       price = price_data.loc[check_date]['Close']
+                  # --- Compare using date() ---
+                  index_dates = price_data.index.date
+                  if check_date_date_obj in index_dates:
+                  # --- End Change ---
+
+                       # Locate the row using boolean indexing on the date part
+                       try:
+                            # Make sure 'Close' column exists
+                            if 'Close' not in price_data.columns:
+                                logging.warning(f"'Close' column missing for {ticker} on {check_date_date_obj}. Skipping.")
+                                all_prices_found=False; missing_ticker_on_date=f"{ticker} (No Close Col)"; break
+
+                            # Find matching rows and get the first 'Close' value
+                            matching_rows = price_data[price_data.index.date == check_date_date_obj]
+                            if not matching_rows.empty:
+                                price = matching_rows['Close'].iloc[0]
+                            else:
+                                # This case should be caught by 'in index_dates' but safety check
+                                logging.warning(f"Date {check_date_date_obj} found in index dates but failed boolean index for {ticker}. Skipping.")
+                                all_prices_found = False; missing_ticker_on_date = f"{ticker} (Loc Failed)"; break
+
+                       except Exception as e:
+                             logging.warning(f"Error during boolean indexing/loc for {check_date_date_obj} in {ticker}: {e}. Skipping.")
+                             all_prices_found = False; missing_ticker_on_date = f"{ticker} (Loc Error)"; break
+
+                       # Check if price is valid
                        if pd.notna(price) and price > 0:
                            temp_prices[ticker] = price
-                       else: # Price is NaN or zero
-                           all_prices_found = False; missing_ticker_on_date = f"{ticker} (Invalid Price: {price})"; logging.debug(f"Invalid price found for {ticker} on {check_date.strftime('%Y-%m-%d')}"); break
+                       else:
+                           all_prices_found = False; missing_ticker_on_date = f"{ticker} (Invalid Price: {price})"; logging.debug(f"Invalid price found for {ticker} on {check_date_date_obj}"); break
                   else: # Date missing in index
-                      all_prices_found = False; missing_ticker_on_date = f"{ticker} (Date Missing)"; logging.debug(f"Date {check_date.strftime('%Y-%m-%d')} missing for {ticker}"); break
+                      all_prices_found = False; missing_ticker_on_date = f"{ticker} (Date Missing)"; logging.debug(f"Date {check_date_date_obj} missing for {ticker}"); break
              else: # File missing or empty
                  all_prices_found = False; missing_ticker_on_date = f"{ticker} (File Missing/Empty)"; logging.debug(f"Data file missing or empty for {ticker}"); break
 
          # Check if prices for *all* tickers were found for this date
          if all_prices_found:
               latest_prices = temp_prices
-              found_prices_date = check_date # Store the datetime object used
+              found_prices_date = check_date # Store the original datetime object used
               logging.info(f"Using prices from {found_prices_date.strftime('%Y-%m-%d')} for simulation.")
               break # Exit outer loop once prices are found
          else:
              # Log *why* this date failed if a reason was identified
              reason = f"Reason: {missing_ticker_on_date}" if missing_ticker_on_date else "Unknown reason."
-             logging.warning(f"Price check failed for date {check_date.strftime('%Y-%m-%d')}. {reason}")
+             logging.warning(f"Price check failed for date {check_date_date_obj.strftime('%Y-%m-%d')}. {reason}")
 
     # Check if prices were successfully found for a recent date
     if not latest_prices:
           logging.error(f"Could not find recent valid close prices for all {len(tickers_in_trades)} traded tickers after checking {days_to_check} days. Cannot accurately update state.")
+          # Decide whether to proceed with potentially inaccurate state or fail
+          # It's safer to fail here to avoid propagating bad state
           exit(1)
 
 
