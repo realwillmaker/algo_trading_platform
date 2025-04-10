@@ -3,6 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 import logging
 import os
+import json
 
 import config
 
@@ -65,6 +66,43 @@ def save_data_to_file(df, ticker, data_dir=config.DATA_DIR):
 
 # --- Other Utilities can be added here ---
 # E.g., Functions for specific data provider interactions, logging setup, etc.
+
+def save_portfolio_state(state_dict, filepath=config.PORTFOLIO_STATE_FILE):
+    """Saves the portfolio state (cash, positions) to a JSON file."""
+    logging.info(f"Saving portfolio state to {filepath}")
+    try:
+        with open(filepath, 'w') as f:
+            json.dump(state_dict, f, indent=4)
+        logging.debug(f"State saved: {state_dict}")
+    except Exception as e:
+        logging.error(f"Failed to save portfolio state to {filepath}: {e}", exc_info=True)
+
+def load_portfolio_state(filepath=config.PORTFOLIO_STATE_FILE):
+    """
+    Loads the portfolio state from a JSON file.
+    If the file doesn't exist, initializes with default values.
+    """
+    logging.info(f"Loading portfolio state from {filepath}")
+    if os.path.exists(filepath):
+        try:
+            with open(filepath, 'r') as f:
+                state = json.load(f)
+                # Basic validation
+                if 'cash' in state and 'positions' in state:
+                    logging.info("Portfolio state loaded successfully.")
+                    logging.debug(f"Loaded state: {state}")
+                    # Ensure positions keys are strings if loaded from JSON nums
+                    state['positions'] = {str(k): int(v) for k, v in state.get('positions', {}).items()}
+                    return state
+                else:
+                    logging.warning(f"Portfolio state file {filepath} is missing required keys ('cash', 'positions'). Initializing.")
+                    return {'cash': config.INITIAL_CAPITAL, 'positions': {}}
+        except Exception as e:
+            logging.error(f"Failed to load or parse portfolio state from {filepath}: {e}. Initializing.", exc_info=True)
+            return {'cash': config.INITIAL_CAPITAL, 'positions': {}}
+    else:
+        logging.warning(f"Portfolio state file {filepath} not found. Initializing with default capital.")
+        return {'cash': config.INITIAL_CAPITAL, 'positions': {}} # Initial state
 
 if __name__ == '__main__':
     # Example usage:
