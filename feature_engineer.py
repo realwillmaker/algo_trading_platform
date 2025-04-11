@@ -266,18 +266,80 @@ def create_feature_dataset(tickers, start_date, end_date):
 
 
 if __name__ == "__main__":
-    logging.info("--- Running Feature Engineering Standalone ---")
+    # Example Usage & Verification
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s') # Ensure logging is configured for standalone run
+    logging.info("--- Running Feature Engineering Standalone for Verification ---")
     sp500_tickers = utils.get_sp500_tickers()
-    stock_tickers = [t for t in sp500_tickers if t not in config.MACRO_FEATURES.values() and t != config.BENCHMARK_TICKER]
-    features_dict = create_feature_dataset(stock_tickers, config.START_DATE, config.END_DATE_TRAIN)
-    if features_dict:
-        sample_ticker = next(iter(features_dict), None)
-        if sample_ticker:
-            print(f"\nSample Features for {sample_ticker}:")
-            print(features_dict[sample_ticker].head())
-            print(f"\nShape: {features_dict[sample_ticker].shape}")
-            print(f"Columns: {features_dict[sample_ticker].columns.tolist()}")
-            print("\nData Types:"); print(features_dict[sample_ticker].dtypes)
-        else: print("\nNo features dictionary generated.")
-    else: print("\nFeature generation failed.")
-    logging.info("--- Feature Engineering Standalone Run Finished ---")
+    stock_tickers = [t for t in sp500_tickers
+                     if t not in config.MACRO_FEATURES.values()
+                     and t != config.BENCHMARK_TICKER]
+
+    # Use a smaller date range for faster verification if needed
+    verify_start_date = (pd.to_datetime(config.END_DATE_TRAIN) - pd.Timedelta(days=90)).strftime('%Y-%m-%d')
+    verify_end_date = config.END_DATE_TRAIN
+    logging.info(f"Generating features for verification range: {verify_start_date} to {verify_end_date}")
+
+    features_dict = create_feature_dataset(stock_tickers, verify_start_date, verify_end_date)
+
+    if not features_dict:
+        print("\nFeature generation failed or produced no results.")
+        exit()
+
+    # --- Verification Steps ---
+    print("\n" + "="*30)
+    print(" Feature Verification")
+    print(f" Generated features for {len(features_dict)} tickers.")
+    print("="*30)
+
+    # Choose a sample ticker (or loop through a few)
+    sample_tickers_to_check = ['AAPL', 'MSFT', 'JPM'] # Add tickers you want to inspect
+    for sample_ticker in sample_tickers_to_check:
+        if sample_ticker in features_dict:
+            print(f"\n--- Verifying Ticker: {sample_ticker} ---")
+            df_sample = features_dict[sample_ticker]
+
+            # 1. Check Columns: Do expected indicator columns exist?
+            print("\n[Check 1: Columns]")
+            actual_columns = df_sample.columns.tolist()
+            print(f"Columns present ({len(actual_columns)}): {actual_columns}")
+            # Define expected technical indicator columns based on config and pandas-ta naming
+            # Note: pandas-ta MACD adds 3 cols (_12_26_9, h_12_26_9, s_12_26_9), BBands adds 5 (L, M, U, B, P)
+            expected_tech_indicators = list(config.TECHNICAL_INDICATORS.keys()) # From config
+            # Manually list expected output columns from pandas-ta for the config
+            expected_output_cols = ['SMA_10', 'SMA_50', 'RSI_14', 'MACD_12_26_9', 'MACDh_12_26_9', 'MACDs_12_26_9', 'BBL_20_2.0', 'BBM_20_2.0', 'BBU_20_2.0', 'BBB_20_2.0', 'BBP_20_2.0', 'ATRr_14', 'OBV'] # Adjust based on your EXACT config and pandas-ta version output
+            expected_macro_indicators = [k for k,v in config.MACRO_FEATURES.items() if v == '^VIX'] # Currently just 'VIX' if using ^VIX
+            missing_tech = [col for col in expected_output_cols if col not in actual_columns]
+            missing_macro = [col for col in expected_macro_indicators if col not in actual_columns]
+            if not missing_tech: print("  > Expected technical indicators found.")
+            else: print(f"  > !! WARNING !! Missing technical indicators: {missing_tech}")
+            if not missing_macro: print("  > Expected macro indicators found.")
+            else: print(f"  > !! WARNING !! Missing macro indicators: {missing_macro}")
+
+            # 2. Check Data Types: Are indicators numeric?
+            print("\n[Check 2: Data Types]")
+            print(df_sample.dtypes.to_string())
+            # Look for float64 or int64 for indicator columns
+
+            # 3. Check for NaNs: Should be minimal after processing
+            print("\n[Check 3: NaN Values]")
+            nan_counts = df_sample.isnull().sum()
+            nan_cols = nan_counts[nan_counts > 0]
+            if nan_cols.empty:
+                print("  > No NaN values found in the final features for this date range.")
+            else:
+                print("  > !! WARNING !! NaN values found:")
+                print(nan_cols.to_string())
+
+            # 4. Check Sample Values: Look at recent data
+            print("\n[Check 4: Sample Values (Last 5 Rows)]")
+            print(df_sample.tail().to_string())
+            # Manually inspect if values look reasonable (e.g., RSI range, SMA values near Close, VIX values)
+
+        else:
+            print(f"\n--- Ticker {sample_ticker} not found in features_dict ---")
+
+    print("\n" + "="*30)
+    print(" Verification Complete")
+    print("="*30)
+
+    logging.info("--- Feature Engineering Standalone Verification Finished ---")
